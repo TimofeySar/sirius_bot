@@ -1,0 +1,180 @@
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from collections import defaultdict
+import logging
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+user_data = defaultdict(lambda: {'notes': {}})
+
+
+async def start(update: Update, context):
+    keyboard = [
+        [InlineKeyboardButton("Заметки", callback_data='notes')],
+        [InlineKeyboardButton("Напоминания", callback_data='reminders')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Здравствуйте! Это бот органайзер и он поможет вам ничего не забывать. Выберите раздел:",
+        reply_markup=reply_markup
+    )
+
+async def notes(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton("Создать тему", callback_data='create_topic')],
+        [InlineKeyboardButton("Просмотреть темы", callback_data='view_topics')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        text="Выберите действие с заметками:",
+        reply_markup=reply_markup
+    )
+
+async def create_topic(update: Update, context):
+    user_id = update.callback_query.from_user.id
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(text="Введите название новой темы:")
+    context.user_data['state'] = 'waiting_for_topic_name'
+    context.user_data['user_id'] = user_id
+    logging.info(f"User {user_id}: Ожидание ввода названия новой темы.")
+
+
+async def add_topic(update: Update, context):
+    user_id = context.user_data.get('user_id')
+    if not user_id:
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        logging.error("User ID not found in context during add_topic.")
+        return
+
+    topic_name = update.message.text
+    if topic_name in user_data[user_id]['notes']:
+        await update.message.reply_text(f"Тема '{topic_name}' уже существует.")
+    else:
+        user_data[user_id]['notes'][topic_name] = []
+        keyboard = [
+            [InlineKeyboardButton("Добавить заметку", callback_data=f"add_note_{topic_name}")],
+            [InlineKeyboardButton("Назад", callback_data='notes')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(f"Тема '{topic_name}' создана. Теперь вы можете добавлять в нее заметки.", reply_markup=reply_markup)
+        logging.info(f"User {user_id}: Тема '{topic_name}' создана.")
+
+    context.user_data['state'] = None
+    context.user_data['user_id'] = None
+
+async def view_topics(update: Update, context):
+    user_id = update.callback_query.from_user.id
+    await update.callback_query.answer()
+
+    topics = user_data[user_id]['notes']
+    if not topics:
+        keyboard = [
+            [InlineKeyboardButton("Назад", callback_data='notes')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(text="У вас еще нет тем.", reply_markup=reply_markup)
+        return
+
+    keyboard = [[InlineKeyboardButton(topic, callback_data=f"topic_{topic}")] for topic in topics]
+    keyboard.append([InlineKeyboardButton("Назад", callback_data='notes')]) 
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text="Ваши темы:",
+        reply_markup=reply_markup
+    )
+    logging.info(f"User {user_id}: Просмотр тем.")
+
+async def view_topic_notes(update: Update, context):
+    user_id = update.callback_query.from_user.id
+    query_data = update.callback_query.data
+    topic_name = query_data.split('_', 1)[1]  # Получение названия темы из callback_data
+
+    await update.callback_query.answer()
+
+    notes = user_data[user_id]['notes'].get(topic_name, [])
+    if not notes:
+        notes_text = "Заметок нет."
+    else:
+        notes_text = "\n".join(f"- {note}" for note in notes)
+
+    keyboard = [
+        [InlineKeyboardButton("Добавить заметку", callback_data=f"add_note_{topic_name}")],
+        [InlineKeyboardButton("Назад к темам", callback_data='view_topics')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text=f"Тема: {topic_name}\n\nЗаметки:\n{notes_text}",
+        reply_markup=reply_markup
+    )
+    logging.info(f"User {user_id}: Просмотр заметок в теме '{topic_name}'.")
+
+async def add_note_prompt(update: Update, context):
+    user_id = update.callback_query.from_user.id
+    query_data = update.callback_query.data
+    topic_name = query_data.split('_', 2)[2]
+
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(text=f"Введите заметку для темы '{topic_name}':")
+
+    context.user_data['state'] = 'waiting_for_note'
+    context.user_data['user_id'] = user_id
+    context.user_data['topic_name'] = topic_name
+    logging.info(f"User {user_id}: Ожидание ввода заметки для темы '{topic_name}'.")
+
+async def add_note_to_topic(update: Update, context):
+    user_id = context.user_data.get('user_id')
+    topic_name = context.user_data.get('topic_name')
+    note_text = update.message.text
+
+    if not user_id or not topic_name:
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        logging.error(f"Missing user_id or topic_name. user_id: {user_id}, topic_name: {topic_name}")
+        return
+
+    user_data[user_id]['notes'][topic_name].append(note_text)
+    keyboard = [
+        [InlineKeyboardButton("Назад к темам", callback_data='view_topics')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"Заметка добавлена в тему '{topic_name}'.", reply_markup=reply_markup)
+    logging.info(f"User {user_id}: Заметка добавлена в тему '{topic_name}'.")
+
+    context.user_data['state'] = None
+    context.user_data['user_id'] = None
+    context.user_data['topic_name'] = None
+
+async def button(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+
+    if choice == 'notes':
+        await notes(update, context)
+    elif choice == 'create_topic':
+        await create_topic(update, context)
+    elif choice == 'view_topics':
+        await view_topics(update, context)
+    elif choice.startswith('topic_'):
+        await view_topic_notes(update, context)
+    elif choice.startswith('add_note_'):
+        await add_note_prompt(update, context)
+
+async def handle_message(update: Update, context):
+    state = context.user_data.get('state')
+
+    if state == 'waiting_for_topic_name':
+        await add_topic(update, context)
+    elif state == 'waiting_for_note':
+        await add_note_to_topic(update, context)
+
+TOKEN = '7293881981:AAG31uHUlKsKSNLSnjAzbLVJriVgNWAsk18'
+application = ApplicationBuilder().token(TOKEN).build()
+
+start_handler = CommandHandler('start', start)
+application.add_handler(start_handler)
+application.add_handler(CallbackQueryHandler(button))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+application.run_polling()
